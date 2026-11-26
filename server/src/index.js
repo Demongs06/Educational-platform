@@ -10,8 +10,8 @@ import { rateLimit } from "express-rate-limit";
 
 const app = express();
 const { PORT = 5000, MONGODB_URI, JWT_SECRET, ADMIN_SETUP_KEY, CLIENT_URL = "http://localhost:5173", NODE_ENV } = process.env;
-if (!MONGODB_URI || !JWT_SECRET || !ADMIN_SETUP_KEY) throw new Error("MONGODB_URI, JWT_SECRET and ADMIN_SETUP_KEY must be configured");
-if (JWT_SECRET.length < 32 || ADMIN_SETUP_KEY.length < 24) throw new Error("JWT_SECRET must be at least 32 characters and ADMIN_SETUP_KEY at least 24 characters");
+if (JWT_SECRET && JWT_SECRET.length < 32) throw new Error("JWT_SECRET must be at least 32 characters");
+if (ADMIN_SETUP_KEY && ADMIN_SETUP_KEY.length < 24) throw new Error("ADMIN_SETUP_KEY must be at least 24 characters");
 app.set("trust proxy", 1);
 app.use(helmet());
 app.use(cors({ origin: CLIENT_URL, credentials: true }));
@@ -54,6 +54,7 @@ const Enrollment = mongoose.model("Enrollment", enrollmentSchema);
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: true, legacyHeaders: false });
 const cookieOptions = { httpOnly: true, secure: NODE_ENV === "production", sameSite: NODE_ENV === "production" ? "none" : "lax", path: "/", maxAge: 7 * 24 * 60 * 60 * 1000 };
 function issueSession(res, user) {
+  if (!JWT_SECRET) throw new Error("JWT_SECRET is not configured");
   const token = jwt.sign({ sub: user._id.toString(), role: user.role }, JWT_SECRET, { expiresIn: "7d" });
   res.cookie("learnhub_session", token, cookieOptions);
 }
@@ -80,10 +81,18 @@ function handleError(err, res) {
   console.error(err);
   return res.status(500).json({ message: "Server error. Please try again." });
 }
-app.get("/api/health", (req, res) => res.json({ status: "ok" }));
+app.get("/api/health", (req, res) => res.json({
+  status: "ok",
+  database: mongoose.connection.readyState === 1 ? "connected" : "not_configured"
+}));
+app.use("/api", (req, res, next) => {
+  if (mongoose.connection.readyState !== 1) return res.status(503).json({ message: "Database is not configured or is temporarily unavailable." });
+  next();
+});
 
 app.post("/api/admin/setup", authLimiter, async (req, res) => {
   try {
+    if (!ADMIN_SETUP_KEY) return res.status(503).json({ message: "ADMIN_SETUP_KEY is not configured." });
     if (!req.get("x-admin-setup-key") || req.get("x-admin-setup-key") !== ADMIN_SETUP_KEY) return res.status(403).json({ message: "Invalid setup key." });
     if (await User.exists({ role: "admin" })) return res.status(409).json({ message: "An administrator has already been created." });
     const { name, email, password } = req.body;
@@ -95,6 +104,7 @@ app.post("/api/admin/setup", authLimiter, async (req, res) => {
 
 app.post("/api/auth/register", authLimiter, async (req, res) => {
   try {
+    if (!JWT_SECRET) return res.status(503).json({ message: "JWT_SECRET is not configured." });
     const { name, email, password } = req.body;
     if (typeof name !== "string" || name.trim().length < 2 || name.length > 80 || typeof email !== "string" || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || typeof password !== "string" || password.length < 8 || password.length > 72) return res.status(400).json({ message: "Enter a valid name, email and password (8–72 characters)." });
     const user = await User.create({ name: name.trim(), email: email.toLowerCase().trim(), password: await bcrypt.hash(password, 12), role: "student" });
@@ -104,6 +114,7 @@ app.post("/api/auth/register", authLimiter, async (req, res) => {
 });
 app.post("/api/auth/login", authLimiter, async (req, res) => {
   try {
+    if (!JWT_SECRET) return res.status(503).json({ message: "JWT_SECRET is not configured." });
     const email = typeof req.body.email === "string" ? req.body.email.toLowerCase().trim() : "";
     const password = typeof req.body.password === "string" ? req.body.password : "";
     const user = await User.findOne({ email }).select("+password");
@@ -158,8 +169,19 @@ app.patch("/api/enrollments/:id/lessons/:lessonId", requireAuth, async (req, res
 });
 
 app.use((err, req, res, next) => { console.error(err); res.status(500).json({ message: "Unexpected server error." }); });
-mongoose.connect(MONGODB_URI).then(async () => {
-  await User.init();
-  await Enrollment.init();
+async function start() {
+  if (MONGODB_URI) {
+    try {
+      await mongoose.connect(MONGODB_URI);
+      await User.init();
+      await Enrollment.init();
+      console.log("MongoDB connected");
+    } catch (err) {
+      console.error("MongoDB connection failed:", err.message);
+    }
+  } else {
+    console.warn("MONGODB_URI is not configured; database routes will return 503.");
+  }
   app.listen(PORT, "0.0.0.0", () => console.log("LearnHub API listening on " + PORT));
-}).catch(err => { console.error("MongoDB connection failed:", err.message); process.exit(1); });
+}
+start();
