@@ -47,10 +47,25 @@ function Auth({ mode, onAuth }) {
 function CourseDetail({ user }) {
   const {id}=useParams(), navigate=useNavigate(), [course,setCourse]=useState(null), [error,setError]=useState("");
   useEffect(()=>{request("/courses/"+id).then(d=>setCourse(d.course)).catch(e=>setError(e.message));},[id]);
-  async function enroll(){ if(!user){navigate("/login");return;} try{await request("/courses/"+id+"/enroll",{method:"POST"});navigate("/dashboard");}catch(e){setError(e.message);} }
+  async function enroll(){ if(!user){navigate("/login");return;} if(course.price>0){navigate("/courses/"+id+"/checkout");return;} try{await request("/courses/"+id+"/enroll",{method:"POST"});navigate("/dashboard");}catch(e){setError(e.message);} }
   if(error)return <main className="page"><p className="error">{error}</p></main>;
   if(!course)return <main className="page state">Loading course…</main>;
-  return <main className="detail page"><Link className="back-link" to="/">← All courses</Link><div className="detail-grid"><div><span className="eyebrow">{course.category || "COURSE"} · {course.level || "ALL LEVELS"}</span><h1>{course.title}</h1><p className="detail-desc">{course.description}</p><h2>What you'll learn</h2><div className="lesson-list">{course.lessons.map((l,i)=><div key={l._id||i}><span>{String(i+1).padStart(2,"0")}</span>{l.title}</div>)}</div></div><aside className="enroll-panel"><div className="panel-art">✳</div><h3>{course.title}</h3><p>{course.lessons.length} lessons · Learn at your own pace</p><strong>{course.price?"₹"+course.price:"Free"}</strong><button className="btn btn-primary submit-btn" onClick={enroll}>{user?"Enroll now":"Log in to enroll"}</button></aside></div></main>;
+  return <main className="detail page"><Link className="back-link" to="/">← All courses</Link><div className="detail-grid"><div><span className="eyebrow">{course.category || "COURSE"} · {course.level || "ALL LEVELS"}</span><h1>{course.title}</h1><p className="detail-desc">{course.description}</p><h2>What you'll learn</h2><div className="lesson-list">{course.lessons.map((l,i)=><div key={l._id||i}><span>{String(i+1).padStart(2,"0")}</span>{l.title}</div>)}</div></div><aside className="enroll-panel"><div className="panel-art">✳</div><h3>{course.title}</h3><p>{course.lessons.length} lessons · Learn at your own pace</p><strong>{course.price?"₹"+course.price:"Free"}</strong><button className="btn btn-primary submit-btn" onClick={enroll}>{!user?"Log in to enroll":course.price>0?"Continue to checkout":"Enroll now"}</button></aside></div></main>;
+}
+function Checkout({ user }) {
+  const {id}=useParams(), navigate=useNavigate(), [course,setCourse]=useState(null), [error,setError]=useState(""), [busy,setBusy]=useState(false);
+  useEffect(()=>{request("/courses/"+id).then(d=>setCourse(d.course)).catch(e=>setError(e.message));},[id]);
+  async function pay(outcome) {
+    setBusy(true); setError("");
+    try { await request("/courses/"+id+"/mock-payment",{method:"POST",body:JSON.stringify({outcome})}); navigate("/dashboard"); }
+    catch(e) { setError(e.message); }
+    finally { setBusy(false); }
+  }
+  if(!user)return <main className="page"><p>Please log in before checkout.</p><Link className="btn btn-primary" to="/login">Log in</Link></main>;
+  if(error&&!course)return <main className="page"><p className="error">{error}</p></main>;
+  if(!course)return <main className="page state">Loading checkout…</main>;
+  if(!course.price)return <main className="page"><p>This course is free. <Link to={"/courses/"+id}>Return to course</Link></p></main>;
+  return <main className="page checkout-page"><span className="eyebrow">DEMO CHECKOUT</span><h1>Complete your enrollment.</h1><section className="checkout-card"><div><h2>{course.title}</h2><p>{course.lessons.length} lessons · Lifetime access</p><small>Payment method</small><div className="dummy-method">▣　Dummy payment simulator</div></div><div className="checkout-total"><span>Total (simulation only)</span><strong>₹{course.price.toLocaleString("en-IN")}</strong></div><p className="demo-notice">This is a portfolio demo. No real payment will be processed and no card details are required.</p>{error&&<p className="error" role="alert">{error}</p>}<button className="btn btn-primary submit-btn" disabled={busy} onClick={()=>pay("success")}>{busy?"Processing…":"Simulate successful payment"}</button><button className="btn btn-outline submit-btn" disabled={busy} onClick={()=>pay("failed")}>Simulate failed payment</button><Link className="back-link checkout-back" to={"/courses/"+id}>Cancel and go back</Link></section></main>;
 }
 function Dashboard({ user }) {
   const [items,setItems]=useState([]),[error,setError]=useState(""),[busy,setBusy]=useState("");
@@ -77,5 +92,5 @@ export default function App(){
   useEffect(()=>{request("/auth/me").then(d=>setUser(d.user)).catch(()=>{}).finally(()=>setReady(true));},[]);
   async function logout(){try{await request("/auth/logout",{method:"POST"});}finally{setUser(null);navigate("/");}}
   if(!ready)return <div className="app-loading">learn<span>hub.</span></div>;
-  return <><Header user={user} onLogout={logout}/><Routes><Route path="/" element={<Home/>}/><Route path="/login" element={<Auth mode="login" onAuth={setUser}/>}/><Route path="/register" element={<Auth mode="register" onAuth={setUser}/>}/><Route path="/courses/:id" element={<CourseDetail user={user}/>}/><Route path="/dashboard" element={user?<Dashboard user={user}/>:<Auth mode="login" onAuth={setUser}/>}/><Route path="/admin" element={user?<Admin user={user}/>:<Auth mode="login" onAuth={setUser}/>}/><Route path="*" element={<main className="page"><h1>Page not found</h1><Link to="/">Go home</Link></main>}/></Routes><Footer/></>;
+  return <><Header user={user} onLogout={logout}/><Routes><Route path="/" element={<Home/>}/><Route path="/login" element={<Auth mode="login" onAuth={setUser}/>}/><Route path="/register" element={<Auth mode="register" onAuth={setUser}/>}/><Route path="/courses/:id" element={<CourseDetail user={user}/>}/><Route path="/courses/:id/checkout" element={<Checkout user={user}/>}/><Route path="/dashboard" element={user?<Dashboard user={user}/>:<Auth mode="login" onAuth={setUser}/>}/><Route path="/admin" element={user?<Admin user={user}/>:<Auth mode="login" onAuth={setUser}/>}/><Route path="*" element={<main className="page"><h1>Page not found</h1><Link to="/">Go home</Link></main>}/></Routes><Footer/></>;
 }
