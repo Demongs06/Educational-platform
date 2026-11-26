@@ -1,4 +1,5 @@
 import "dotenv/config";
+import crypto from "node:crypto";
 import express from "express";
 import mongoose from "mongoose";
 import bcrypt from "bcryptjs";
@@ -44,6 +45,7 @@ const courseSchema = new mongoose.Schema({
 const enrollmentSchema = new mongoose.Schema({
   user: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
   course: { type: mongoose.Schema.Types.ObjectId, ref: "Course", required: true },
+  payment: { status: { type: String, enum: ["mock-paid"] }, amount: Number, transactionId: String, method: { type: String, enum: ["dummy"] }, paidAt: Date },
   progress: [{ lessonId: { type: mongoose.Schema.Types.ObjectId, required: true }, completed: { type: Boolean, default: false }, completedAt: Date }]
 }, { timestamps: true });
 enrollmentSchema.index({ user: 1, course: 1 }, { unique: true });
@@ -146,8 +148,25 @@ app.delete("/api/courses/:id", requireAuth, requireAdmin, async (req, res) => {
   try { if (!validId(req.params.id)) return res.status(400).json({ message: "Invalid course ID." }); const course = await Course.findByIdAndDelete(req.params.id); if (!course) return res.status(404).json({ message: "Course not found." }); await Enrollment.deleteMany({ course: course._id }); res.json({ message: "Course deleted." }); }
   catch (err) { handleError(err, res); }
 });
+app.post("/api/courses/:id/mock-payment", requireAuth, async (req, res) => {
+  try {
+    if (!validId(req.params.id)) return res.status(400).json({ message: "Invalid course ID." });
+    const course = await Course.findOne({ _id: req.params.id, published: true });
+    if (!course) return res.status(404).json({ message: "Course not found." });
+    if (course.price <= 0) return res.status(400).json({ message: "This course does not require payment." });
+    if (!["success", "failed"].includes(req.body.outcome)) return res.status(400).json({ message: "Choose a valid dummy payment outcome." });
+    if (await Enrollment.exists({ user: req.user._id, course: course._id })) return res.status(409).json({ message: "You are already enrolled in this course." });
+    if (req.body.outcome === "failed") return res.status(402).json({ message: "Dummy payment failed. You have not been charged." });
+    const enrollment = await Enrollment.create({
+      user: req.user._id,
+      course: course._id,
+      payment: { status: "mock-paid", amount: course.price, transactionId: "DUMMY-" + crypto.randomUUID(), method: "dummy", paidAt: new Date() }
+    });
+    res.status(201).json({ message: "Dummy payment successful. You are enrolled.", enrollment });
+  } catch (err) { handleError(err, res); }
+});
 app.post("/api/courses/:id/enroll", requireAuth, async (req, res) => {
-  try { if (!validId(req.params.id)) return res.status(400).json({ message: "Invalid course ID." }); const course = await Course.findOne({ _id: req.params.id, published: true }); if (!course) return res.status(404).json({ message: "Course not found." }); if (course.price > 0) return res.status(400).json({ message: "Paid course checkout is not enabled yet." }); const enrollment = await Enrollment.create({ user: req.user._id, course: course._id }); res.status(201).json({ enrollment }); }
+  try { if (!validId(req.params.id)) return res.status(400).json({ message: "Invalid course ID." }); const course = await Course.findOne({ _id: req.params.id, published: true }); if (!course) return res.status(404).json({ message: "Course not found." }); if (course.price > 0) return res.status(400).json({ message: "Use the dummy checkout for paid courses." }); const enrollment = await Enrollment.create({ user: req.user._id, course: course._id }); res.status(201).json({ enrollment }); }
   catch (err) { handleError(err, res); }
 });
 app.get("/api/enrollments/me", requireAuth, async (req, res) => {
