@@ -17,6 +17,13 @@ app.use(helmet());
 app.use(cors({ origin: CLIENT_URL, credentials: true }));
 app.use(express.json({ limit: "30kb" }));
 app.use(cookieParser());
+app.use((req, res, next) => {
+  if (["POST", "PUT", "PATCH", "DELETE"].includes(req.method)) {
+    const origin = req.get("origin");
+    if (origin && origin !== CLIENT_URL) return res.status(403).json({ message: "Request origin is not allowed." });
+  }
+  next();
+});
 
 const userSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true, maxlength: 80 },
@@ -24,6 +31,7 @@ const userSchema = new mongoose.Schema({
   password: { type: String, required: true, select: false },
   role: { type: String, enum: ["student", "admin"], default: "student" }
 }, { timestamps: true });
+userSchema.index({ role: 1 }, { unique: true, partialFilterExpression: { role: "admin" } });
 const courseSchema = new mongoose.Schema({
   title: { type: String, required: true, trim: true, maxlength: 120 },
   description: { type: String, required: true, trim: true, maxlength: 1200 },
@@ -150,6 +158,8 @@ app.patch("/api/enrollments/:id/lessons/:lessonId", requireAuth, async (req, res
 });
 
 app.use((err, req, res, next) => { console.error(err); res.status(500).json({ message: "Unexpected server error." }); });
-mongoose.connect(MONGODB_URI).then(() => {
+mongoose.connect(MONGODB_URI).then(async () => {
+  await User.init();
+  await Enrollment.init();
   app.listen(PORT, "0.0.0.0", () => console.log("LearnHub API listening on " + PORT));
 }).catch(err => { console.error("MongoDB connection failed:", err.message); process.exit(1); });
