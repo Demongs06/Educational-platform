@@ -42,6 +42,11 @@ const courseSchema = new mongoose.Schema({
   lessons: [{ title: { type: String, required: true, trim: true, maxlength: 160 } }],
   published: { type: Boolean, default: true }
 }, { timestamps: true });
+const visitSchema = new mongoose.Schema({
+  visitorId: { type: String, required: true, match: /^[0-9a-f-]{36}$/i },
+  day: { type: String, required: true }
+}, { timestamps: true });
+visitSchema.index({ visitorId: 1, day: 1 }, { unique: true });
 const enrollmentSchema = new mongoose.Schema({
   user: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
   course: { type: mongoose.Schema.Types.ObjectId, ref: "Course", required: true },
@@ -52,6 +57,7 @@ enrollmentSchema.index({ user: 1, course: 1 }, { unique: true });
 const User = mongoose.model("User", userSchema);
 const Course = mongoose.model("Course", courseSchema);
 const Enrollment = mongoose.model("Enrollment", enrollmentSchema);
+const Visit = mongoose.model("Visit", visitSchema);
 
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: true, legacyHeaders: false });
 const cookieOptions = { httpOnly: true, secure: NODE_ENV === "production", sameSite: NODE_ENV === "production" ? "none" : "lax", path: "/", maxAge: 7 * 24 * 60 * 60 * 1000 };
@@ -87,6 +93,17 @@ app.get("/api/health", (req, res) => res.json({
   status: "ok",
   database: mongoose.connection.readyState === 1 ? "connected" : "not_configured"
 }));
+
+const visitorLimiter = rateLimit({ windowMs: 60 * 1000, limit: 30, standardHeaders: true, legacyHeaders: false });
+app.post("/api/analytics/visit", visitorLimiter, async (req, res) => {
+  try {
+    const visitorId = req.body.visitorId;
+    if (typeof visitorId !== "string" || !/^[0-9a-f-]{36}$/i.test(visitorId)) return res.status(400).json({ message: "Invalid visitor identifier." });
+    const day = new Date().toISOString().slice(0, 10);
+    await Visit.updateOne({ visitorId, day }, { $setOnInsert: { visitorId, day } }, { upsert: true });
+    res.status(204).end();
+  } catch (err) { handleError(err, res); }
+});
 app.use("/api", (req, res, next) => {
   if (mongoose.connection.readyState !== 1) return res.status(503).json({ message: "Database is not configured or is temporarily unavailable." });
   next();
@@ -127,6 +144,45 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
 });
 app.get("/api/auth/me", requireAuth, (req, res) => res.json({ user: safeUser(req.user) }));
 app.post("/api/auth/logout", (req, res) => { res.clearCookie("learnhub_session", { ...cookieOptions, maxAge: undefined }); res.json({ message: "Logged out." }); });
+
+app.get("/api/admin/stats", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const now = new Date();
+    const today = now.toISOString().slice(0, 10);
+    const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString().slice(0, 10);
+    const firstDay = new Date(now);
+    firstDay.setUTCDate(firstDay.getUTCDate() - 29);
+    const firstDayKey = firstDay.toISOString().slice(0, 10);
+    const [totalEnrollments, coursesSold, monthlyVisitors, dailyRows, courses] = await Promise.all([
+      Enrollment.countDocuments(),
+      Enrollment.countDocuments({ "payment.status": "mock-paid" }),
+      Visit.distinct("visitorId", { day: { $gte: monthStart, $lte: today } }).then(ids => ids.length),
+      Visit.aggregate([
+        { $match: { day: { $gte: firstDayKey, $lte: today } } },
+        { $group: { _id: "$day", visitors: { $sum: 1 } } },
+        { $sort: { _id: 1 } }
+      ]),
+      Course.aggregate([
+        { $match: { published: true } },
+        { $lookup: { from: "enrollments", localField: "_id", foreignField: "course", as: "enrollments" } },
+        { $project: {
+          title: 1, price: 1, category: 1, lessons: 1,
+          enrollmentCount: { $size: "$enrollments" },
+          salesCount: { $size: { $filter: { input: "$enrollments", as: "enrollment", cond: { $eq: ["$enrollment.payment.status", "mock-paid"] } } } }
+        } },
+        { $sort: { title: 1 } }
+      ])
+    ]);
+    const dailyMap = new Map(dailyRows.map(row => [row._id, row.visitors]));
+    const dailyVisitors = Array.from({ length: 30 }, (_, index) => {
+      const date = new Date(firstDay);
+      date.setUTCDate(firstDay.getUTCDate() + index);
+      const day = date.toISOString().slice(0, 10);
+      return { day, visitors: dailyMap.get(day) || 0 };
+    });
+    res.json({ totalEnrollments, coursesSold, monthlyVisitors, dailyVisitors, courses });
+  } catch (err) { handleError(err, res); }
+});
 
 app.get("/api/courses", async (req, res) => {
   try { const courses = await Course.find({ published: true }).sort({ createdAt: -1 }).lean(); res.json({ courses }); }
@@ -194,6 +250,7 @@ async function start() {
       await mongoose.connect(MONGODB_URI);
       await User.init();
       await Enrollment.init();
+      await Visit.init();
       console.log("MongoDB connected");
     } catch (err) {
       console.error("MongoDB connection failed:", err.message);
